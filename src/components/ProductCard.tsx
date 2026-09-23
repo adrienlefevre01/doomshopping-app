@@ -39,7 +39,7 @@ export function ProductCard({
             {actionLabel && onAction ? (
               <button
                 type="button"
-                className="btn btn--primary btn--small"
+                className="btn btn--ink btn--small"
                 onClick={(event) => {
                   event.stopPropagation()
                   onAction()

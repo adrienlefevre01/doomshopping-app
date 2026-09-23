@@ -85,56 +85,48 @@ export function Scan() {
 
   return (
     <section className="page page--scan">
-      <header className="scan-header">
-        <button
-          type="button"
-          className="btn btn--ghost btn--small"
-          onClick={() => navigate('/home')}
-        >
-          Cancel
-        </button>
-        <h1>Scan barcode</h1>
-        <span className="scan-header__spacer" />
-      </header>
+      <button
+        type="button"
+        className="scan-close"
+        onClick={() => navigate('/home')}
+        aria-label="Close"
+      >
+        ×
+      </button>
 
       <div className="scan-stage">
         <div id={READER_ID} className="scan-reader" />
-        {!cameraError ? <div className="scan-reticle" aria-hidden="true" /> : null}
-        <p className="scan-hint">
-          {cameraError ?? 'Line up the barcode on the clothing tag'}
-        </p>
       </div>
 
-      <div className="scan-manual">
-        {showManual ? (
-          <form className="manual-form" onSubmit={handleManualSubmit}>
-            <label htmlFor="manual-barcode">Barcode number</label>
-            <input
-              id="manual-barcode"
-              inputMode="numeric"
-              autoComplete="off"
-              placeholder="e.g. 8445305131204"
-              value={manualCode}
-              onChange={(event) => setManualCode(event.target.value)}
-            />
-            <button
-              type="submit"
-              className="btn btn--primary btn--block"
-              disabled={!isValidBarcode(manualCode)}
-            >
-              Find retailers
-            </button>
-          </form>
-        ) : (
+      {showManual ? (
+        <form className="manual-sheet" onSubmit={handleManualSubmit}>
+          <label htmlFor="manual-barcode">Barcode number</label>
+          <input
+            id="manual-barcode"
+            inputMode="numeric"
+            autoComplete="off"
+            placeholder="e.g. 888409037816"
+            value={manualCode}
+            onChange={(event) => setManualCode(event.target.value)}
+          />
           <button
-            type="button"
-            className="btn btn--ghost btn--block"
-            onClick={() => setShowManual(true)}
+            type="submit"
+            className="btn btn--ink btn--block"
+            disabled={!isValidBarcode(manualCode)}
           >
-            Type barcode instead
+            Find retailers
           </button>
-        )}
-      </div>
+        </form>
+      ) : null}
+
+      <button
+        type="button"
+        className="shutter"
+        aria-label={showManual ? 'Hide keypad' : 'Type barcode'}
+        onClick={() => setShowManual((open) => !open)}
+      />
+
+      {cameraError && !showManual ? <p className="scan-note">{cameraError}</p> : null}
     </section>
   )
 }

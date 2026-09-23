@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { ChevronIcon } from '../components/Icons'
 import { ProductCard } from '../components/ProductCard'
 import { lookupProduct } from '../lib/lookup'
 import { addWishlistItem } from '../lib/wishlist'
@@ -60,16 +61,17 @@ export function Matches() {
 
   return (
     <section className="page page--matches">
-      <header className="page-header">
+      <header className="sheet-header">
         <button
           type="button"
-          className="btn btn--ghost btn--small"
+          className="back-btn"
           onClick={() => navigate('/home')}
+          aria-label="Back"
         >
-          Cancel
+          <ChevronIcon />
         </button>
         <div>
-          <p className="eyebrow">Barcode {barcode}</p>
+          <p className="muted">Barcode {barcode}</p>
           <h1>Choose a listing</h1>
         </div>
       </header>
@@ -77,7 +79,7 @@ export function Matches() {
       {loading ? (
         <div className="status-block">
           <div className="spinner" aria-hidden="true" />
-          <p>Finding retailer links…</p>
+          <p className="muted">Finding retailer links…</p>
         </div>
       ) : null}
 
@@ -89,7 +91,7 @@ export function Matches() {
             <li key={`${item.retailer}-${item.productUrl}`}>
               <ProductCard
                 item={item}
-                actionLabel="Save to wishlist"
+                actionLabel="Save"
                 onAction={() => handleSave(item)}
               />
             </li>

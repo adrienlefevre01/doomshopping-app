@@ -14,6 +14,7 @@ type ScrapedFields = {
   price?: string
   imageUrl?: string
   retailer?: string
+  finalUrl?: string
 }
 
 export type LookupResponse = {
@@ -24,6 +25,8 @@ export type LookupResponse = {
 const BARCODE_PATTERN = /^\d{8,14}$/
 const MAX_CANDIDATES = 4
 const FETCH_TIMEOUT_MS = 4000
+const GEMINI_TIMEOUT_MS = 18000
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-3.6-flash']
 
 const SKIP_HOSTS = [
   'wikipedia.org',
@@ -42,6 +45,8 @@ const SKIP_HOSTS = [
   'barcodelookup.com',
   'upcitemdb.com',
   'go-upc.com',
+  'vertexaisearch.cloud.google.com',
+  'grounding-api-redirect',
 ]
 
 const RETAILER_NAMES: Record<string, string> = {
@@ -79,29 +84,20 @@ export async function handleLookup(
     return { status: 400, body: { error: 'Enter an 8–14 digit barcode.' } }
   }
 
-  const apiKey = env.SEARCH_API_KEY?.trim()
+  const apiKey = env.GEMINI_API_KEY?.trim() || env.SEARCH_API_KEY?.trim()
   if (!apiKey) {
     return {
       status: 503,
       body: {
         error:
-          'Search is not configured yet. Add SEARCH_API_KEY on the server.',
+          'Search is not configured yet. Add GEMINI_API_KEY on the server.',
       },
     }
   }
 
   try {
     const identity = await lookupBarcodeIdentity(normalized)
-    const query = [
-      identity.title,
-      identity.brand,
-      normalized,
-      'buy',
-    ]
-      .filter(Boolean)
-      .join(' ')
-
-    const hits = await searchRetailerLinks(query, apiKey, env.GOOGLE_CSE_ID)
+    const hits = await searchRetailerLinks(normalized, identity, apiKey, env.GEMINI_MODEL)
     if (hits.length === 0) {
       return {
         status: 404,
@@ -117,7 +113,14 @@ export async function handleLookup(
       status: 200,
       body: { barcode: normalized, candidates },
     }
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    if (message === 'gemini unauthorized') {
+      return {
+        status: 502,
+        body: { error: 'Gemini rejected the API key. Check GEMINI_API_KEY.' },
+      }
+    }
     return {
       status: 502,
       body: { error: 'Could not look up this barcode right now.' },
@@ -145,78 +148,175 @@ async function lookupBarcodeIdentity(
 }
 
 async function searchRetailerLinks(
-  query: string,
+  barcode: string,
+  identity: { title?: string; brand?: string },
   apiKey: string,
-  cseId: string | undefined,
+  preferredModel: string | undefined,
 ): Promise<SearchHit[]> {
-  const hits = cseId?.trim()
-    ? await searchGoogleCse(query, apiKey, cseId.trim())
-    : await searchSerpApi(query, apiKey)
-  return dedupeHits(hits.filter((hit) => isUsefulProductUrl(hit.url)))
+  const models = [
+    preferredModel?.trim(),
+    ...GEMINI_MODELS,
+  ].filter((model, index, all): model is string => Boolean(model) && all.indexOf(model) === index)
+
+  let lastError: Error | null = null
+  for (const model of models) {
+    try {
+      const hits = await searchGemini(barcode, identity, apiKey, model)
+      const resolved = await Promise.all(
+        hits.map(async (hit) => ({ ...hit, url: await resolveRedirectUrl(hit.url) })),
+      )
+      const useful = dedupeHits(resolved.filter((hit) => isUsefulProductUrl(hit.url)))
+      if (useful.length === 0) throw new Error('gemini empty')
+      return useful
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('search failed')
+      if (lastError.message === 'gemini unauthorized') throw lastError
+    }
+  }
+  if (lastError?.message === 'gemini empty') return []
+  throw lastError ?? new Error('search failed')
 }
 
-async function searchSerpApi(query: string, apiKey: string): Promise<SearchHit[]> {
-  const url = new URL('https://serpapi.com/search.json')
-  url.searchParams.set('engine', 'google')
-  url.searchParams.set('q', query)
-  url.searchParams.set('num', '10')
-  url.searchParams.set('api_key', apiKey)
-
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  })
-  if (!response.ok) throw new Error('search failed')
-
-  const data = (await response.json()) as {
-    organic_results?: Array<{ title?: string; link?: string; source?: string }>
-  }
-  return (data.organic_results ?? [])
-    .filter((item) => item.link && item.title)
-    .map((item) => ({
-      title: item.title as string,
-      url: item.link as string,
-      source: item.source,
-    }))
+type GeminiResponse = {
+  error?: { message?: string; status?: string; code?: number }
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> }
+    groundingMetadata?: {
+      groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>
+    }
+  }>
 }
 
-async function searchGoogleCse(
-  query: string,
+async function searchGemini(
+  barcode: string,
+  identity: { title?: string; brand?: string },
   apiKey: string,
-  cseId: string,
+  model: string,
 ): Promise<SearchHit[]> {
-  const url = new URL('https://www.googleapis.com/customsearch/v1')
-  url.searchParams.set('key', apiKey)
-  url.searchParams.set('cx', cseId)
-  url.searchParams.set('q', query)
-  url.searchParams.set('num', '8')
+  const known = [identity.title, identity.brand].filter(Boolean).join(' by ')
+  const prompt = [
+    'Find official clothing retailer product pages for this barcode scanned in a store.',
+    `Barcode: ${barcode}`,
+    known ? `Known product hint: ${known}` : '',
+    'Prefer brand sites and fashion retailers (Zara, H&M, ASOS, Uniqlo, Nike, Adidas, Farfetch, Zalando, department stores).',
+    'Return ONLY a JSON array of 3 to 4 items, no markdown:',
+    '[{"retailer":"Zara","title":"Product name","url":"https://..."}]',
+    'Use real https product page URLs only. No homepages, search pages, Wikipedia, or social posts.',
+  ]
+    .filter(Boolean)
+    .join('\n')
 
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  })
-  if (!response.ok) throw new Error('search failed')
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: 'POST',
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        tools: [{ google_search: {} }],
+      }),
+    },
+  )
 
-  const data = (await response.json()) as {
-    items?: Array<{ title?: string; link?: string; displayLink?: string }>
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('gemini unauthorized')
   }
-  return (data.items ?? [])
-    .filter((item) => item.link && item.title)
-    .map((item) => ({
-      title: item.title as string,
-      url: item.link as string,
-      source: item.displayLink,
+  if (response.status === 404) {
+    throw new Error('gemini model missing')
+  }
+  if (!response.ok) {
+    throw new Error('search failed')
+  }
+
+  const data = (await response.json()) as GeminiResponse
+  if (data.error) {
+    const status = data.error.status ?? ''
+    if (status.includes('UNAUTHENTICATED') || status.includes('PERMISSION')) {
+      throw new Error('gemini unauthorized')
+    }
+    throw new Error('search failed')
+  }
+
+  const candidate = data.candidates?.[0]
+  const text = candidate?.content?.parts?.map((part) => part.text ?? '').join('\n') ?? ''
+  const fromModel = parseHitsFromModelText(text)
+  const fromGrounding = (candidate?.groundingMetadata?.groundingChunks ?? [])
+    .map((chunk) => ({
+      title: chunk.web?.title ?? 'Product',
+      url: chunk.web?.uri ?? '',
+      source: retailerFromUrl(chunk.web?.uri ?? ''),
     }))
+    .filter((hit) => hit.url)
+
+  const hits = [...fromModel, ...fromGrounding]
+  if (hits.length === 0) throw new Error('gemini empty')
+  return hits
+}
+
+async function resolveRedirectUrl(pageUrl: string): Promise<string> {
+  if (
+    !pageUrl.includes('vertexaisearch') &&
+    !pageUrl.includes('grounding-api-redirect')
+  ) {
+    return pageUrl
+  }
+  try {
+    const response = await fetch(pageUrl, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(3000),
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        Accept: 'text/html',
+      },
+    })
+    return response.url || pageUrl
+  } catch {
+    return pageUrl
+  }
+}
+
+function parseHitsFromModelText(text: string): SearchHit[] {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text)
+  const raw = fenced?.[1] ?? text
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end === -1) return []
+
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1)) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== 'object') return []
+      const record = item as { title?: unknown; url?: unknown; retailer?: unknown }
+      const url = asString(record.url)
+      const title = asString(record.title)
+      if (!url || !title) return []
+      return [{ title, url, source: asString(record.retailer) }]
+    })
+  } catch {
+    return []
+  }
 }
 
 async function hydrateHit(hit: SearchHit): Promise<RetailerMatch> {
   const scraped = await scrapeProductPage(hit.url)
+  const productUrl = scraped.finalUrl ?? hit.url
   return {
     retailer:
-      scraped.retailer ?? retailerFromUrl(hit.url) ?? hit.source ?? 'Store',
+      scraped.retailer ??
+      retailerFromUrl(productUrl) ??
+      hit.source ??
+      'Store',
     title: scraped.title ?? hit.title,
     brand: scraped.brand,
     price: scraped.price,
     imageUrl: scraped.imageUrl,
-    productUrl: hit.url,
+    productUrl,
   }
 }
 
@@ -233,7 +333,8 @@ async function scrapeProductPage(pageUrl: string): Promise<ScrapedFields> {
     })
     if (!response.ok) return {}
     const html = await response.text()
-    return parseProductHtml(html, pageUrl)
+    const finalUrl = response.url || pageUrl
+    return { ...parseProductHtml(html, finalUrl), finalUrl }
   } catch {
     return {}
   }
@@ -381,6 +482,10 @@ function isUsefulProductUrl(pageUrl: string): boolean {
     const parsed = new URL(pageUrl)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
     const host = parsed.hostname.replace(/^www\./, '')
+    if (host.includes('vertexaisearch') || host.includes('grounding-api-redirect')) {
+      return false
+    }
+    if (parsed.pathname === '/' || parsed.pathname === '') return false
     return !SKIP_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`))
   } catch {
     return false
@@ -416,7 +521,15 @@ function decodeHtml(value: string): string {
   return value
     .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
+    .replace(/&#x27;/gi, "'")
     .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
+      String.fromCharCode(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, code: string) =>
+      String.fromCharCode(Number(code)),
+    )
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
 }

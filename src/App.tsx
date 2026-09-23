@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { isOnboarded } from './lib/wishlist'
 import { Home } from './pages/Home'
 import { Matches } from './pages/Matches'
+import { Profile } from './pages/Profile'
 import { Scan } from './pages/Scan'
 import { Welcome } from './pages/Welcome'
 import './App.css'
@@ -27,6 +28,14 @@ export default function App() {
           element={
             <RequireOnboard>
               <Home />
+            </RequireOnboard>
+          }
+        />
+        <Route
+          path="/profile"
+          element={
+            <RequireOnboard>
+              <Profile />
             </RequireOnboard>
           }
         />
