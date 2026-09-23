@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ChevronIcon } from '../components/Icons'
+import { ChevronLeft } from 'lucide-react'
 import { ProductCard } from '../components/ProductCard'
 import { lookupProduct } from '../lib/lookup'
 import { addWishlistItem } from '../lib/wishlist'
@@ -27,7 +27,7 @@ export function Matches() {
           setResult(null)
           setLookupError({
             barcode,
-            message: 'No retailer listings found for this barcode.',
+            message: 'No retailer listings found.',
           })
           return
         }
@@ -42,7 +42,7 @@ export function Matches() {
           message:
             error instanceof Error
               ? error.message
-              : 'Could not find retailer links for this barcode.',
+              : 'Could not find retailer links for this search.',
         })
       })
 
@@ -68,10 +68,12 @@ export function Matches() {
           onClick={() => navigate('/home')}
           aria-label="Back"
         >
-          <ChevronIcon />
+          <ChevronLeft size={22} strokeWidth={1.75} />
         </button>
         <div>
-          <p className="muted">Barcode {barcode}</p>
+          <p className="muted">
+            {/^\d{8,14}$/.test(barcode) ? `Barcode ${barcode}` : `Search “${barcode}”`}
+          </p>
           <h1>Choose a listing</h1>
         </div>
       </header>
@@ -91,8 +93,7 @@ export function Matches() {
             <li key={`${item.retailer}-${item.productUrl}`}>
               <ProductCard
                 item={item}
-                actionLabel="Save"
-                onAction={() => handleSave(item)}
+                onHeart={() => handleSave(item)}
               />
             </li>
           ))}

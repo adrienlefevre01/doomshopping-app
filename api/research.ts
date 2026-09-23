@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { handleLookup } from '../lib/server/productLookup'
+import { handleResearch, type ResearchRequest } from '../lib/server/productReviews'
 
 export const config = {
   maxDuration: 30,
@@ -7,7 +7,7 @@ export const config = {
 
 function applyCors(res: VercelResponse) {
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
 }
 
@@ -19,12 +19,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return
   }
 
-  if (req.method !== 'GET') {
+  if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' })
     return
   }
 
-  const query = String(req.query.q ?? req.query.barcode ?? '')
-  const result = await handleLookup(query, process.env)
+  const body = (req.body ?? {}) as ResearchRequest
+  const result = await handleResearch(body, process.env)
   res.status(result.status).json(result.body)
 }

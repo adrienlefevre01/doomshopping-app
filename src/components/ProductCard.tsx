@@ -1,21 +1,29 @@
+import { Heart, RotateCcw, Trash2 } from 'lucide-react'
 import type { RetailerMatch } from '../types'
 
 type ProductCardProps = {
   item: RetailerMatch
-  actionLabel?: string
-  onAction?: () => void
   onClick?: () => void
-  secondaryLabel?: string
-  onSecondary?: () => void
+  onHeart?: () => void
+  onTrash?: () => void
+  onRestore?: () => void
+  hearted?: boolean
+}
+
+function productHeading(item: RetailerMatch) {
+  const brand = item.brand?.trim()
+  const title = item.title.trim()
+  if (!brand) return title
+  return `${brand} - ${title}`
 }
 
 export function ProductCard({
   item,
-  actionLabel,
-  onAction,
   onClick,
-  secondaryLabel,
-  onSecondary,
+  onHeart,
+  onTrash,
+  onRestore,
+  hearted = false,
 }: ProductCardProps) {
   return (
     <article
@@ -31,33 +39,51 @@ export function ProductCard({
       </div>
       <div className="product-card__body">
         <p className="product-card__retailer">{item.retailer}</p>
-        <h3 className="product-card__title">{item.title}</h3>
-        {item.brand ? <p className="product-card__brand">{item.brand}</p> : null}
+        <h3 className="product-card__title">{productHeading(item)}</h3>
         {item.price ? <p className="product-card__price">{item.price}</p> : null}
-        {(actionLabel || secondaryLabel) && (
+        {(onHeart || onTrash || onRestore) && (
           <div className="product-card__actions">
-            {actionLabel && onAction ? (
+            {onRestore ? (
               <button
                 type="button"
-                className="btn btn--ink btn--small"
+                className="icon-btn"
+                aria-label="Restore"
                 onClick={(event) => {
                   event.stopPropagation()
-                  onAction()
+                  onRestore()
                 }}
               >
-                {actionLabel}
+                <RotateCcw size={16} strokeWidth={1.75} />
               </button>
             ) : null}
-            {secondaryLabel && onSecondary ? (
+            {onHeart ? (
               <button
                 type="button"
-                className="btn btn--ghost btn--small"
+                className="icon-btn"
+                aria-label={hearted ? 'Saved' : 'Save'}
                 onClick={(event) => {
                   event.stopPropagation()
-                  onSecondary()
+                  onHeart()
                 }}
               >
-                {secondaryLabel}
+                <Heart
+                  size={16}
+                  strokeWidth={1.75}
+                  fill={hearted ? 'currentColor' : 'none'}
+                />
+              </button>
+            ) : null}
+            {onTrash ? (
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Remove"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onTrash()
+                }}
+              >
+                <Trash2 size={16} strokeWidth={1.75} />
               </button>
             ) : null}
           </div>

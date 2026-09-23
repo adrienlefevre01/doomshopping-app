@@ -1,5 +1,5 @@
+import { Bookmark, User } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { BookmarkIcon, ProfileIcon } from './Icons'
 
 type BottomNavProps = {
   active: 'wishlist' | 'profile'
@@ -16,7 +16,7 @@ export function BottomNav({ active }: BottomNavProps) {
         aria-label="Wishlist"
         onClick={() => navigate('/home')}
       >
-        <BookmarkIcon />
+        <Bookmark size={20} strokeWidth={1.75} />
       </button>
       <button
         type="button"
@@ -24,7 +24,7 @@ export function BottomNav({ active }: BottomNavProps) {
         aria-label="Profile"
         onClick={() => navigate('/profile')}
       >
-        <ProfileIcon />
+        <User size={20} strokeWidth={1.75} />
       </button>
     </nav>
   )

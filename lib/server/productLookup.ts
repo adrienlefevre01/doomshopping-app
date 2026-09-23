@@ -12,6 +12,9 @@ type ScrapedFields = {
   title?: string
   brand?: string
   price?: string
+  color?: string
+  availability?: string
+  description?: string
   imageUrl?: string
   retailer?: string
   finalUrl?: string
@@ -76,12 +79,16 @@ const RETAILER_NAMES: Record<string, string> = {
 }
 
 export async function handleLookup(
-  barcode: string,
+  query: string,
   env: Env,
 ): Promise<LookupResponse> {
-  const normalized = barcode.trim()
-  if (!BARCODE_PATTERN.test(normalized)) {
-    return { status: 400, body: { error: 'Enter an 8–14 digit barcode.' } }
+  const normalized = query.trim()
+  const isBarcode = BARCODE_PATTERN.test(normalized)
+  if (!normalized || (!isBarcode && normalized.length < 2)) {
+    return {
+      status: 400,
+      body: { error: 'Enter a product name or 8–14 digit barcode.' },
+    }
   }
 
   const apiKey = env.GEMINI_API_KEY?.trim() || env.SEARCH_API_KEY?.trim()
@@ -96,12 +103,22 @@ export async function handleLookup(
   }
 
   try {
-    const identity = await lookupBarcodeIdentity(normalized)
-    const hits = await searchRetailerLinks(normalized, identity, apiKey, env.GEMINI_MODEL)
+    const identity = isBarcode ? await lookupBarcodeIdentity(normalized) : {}
+    const hits = await searchRetailerLinks(
+      normalized,
+      identity,
+      apiKey,
+      env.GEMINI_MODEL,
+      isBarcode ? 'barcode' : 'query',
+    )
     if (hits.length === 0) {
       return {
         status: 404,
-        body: { error: 'No retailer listings found for this barcode.' },
+        body: {
+          error: isBarcode
+            ? 'No retailer listings found for this barcode.'
+            : 'No retailer listings found for this search.',
+        },
       }
     }
 
@@ -148,10 +165,11 @@ async function lookupBarcodeIdentity(
 }
 
 async function searchRetailerLinks(
-  barcode: string,
+  query: string,
   identity: { title?: string; brand?: string },
   apiKey: string,
   preferredModel: string | undefined,
+  mode: 'barcode' | 'query',
 ): Promise<SearchHit[]> {
   const models = [
     preferredModel?.trim(),
@@ -161,7 +179,7 @@ async function searchRetailerLinks(
   let lastError: Error | null = null
   for (const model of models) {
     try {
-      const hits = await searchGemini(barcode, identity, apiKey, model)
+      const hits = await searchGemini(query, identity, apiKey, model, mode)
       const resolved = await Promise.all(
         hits.map(async (hit) => ({ ...hit, url: await resolveRedirectUrl(hit.url) })),
       )
@@ -188,15 +206,18 @@ type GeminiResponse = {
 }
 
 async function searchGemini(
-  barcode: string,
+  query: string,
   identity: { title?: string; brand?: string },
   apiKey: string,
   model: string,
+  mode: 'barcode' | 'query',
 ): Promise<SearchHit[]> {
   const known = [identity.title, identity.brand].filter(Boolean).join(' by ')
   const prompt = [
-    'Find official clothing retailer product pages for this barcode scanned in a store.',
-    `Barcode: ${barcode}`,
+    mode === 'barcode'
+      ? 'Find official clothing retailer product pages for this barcode scanned in a store.'
+      : 'Find official clothing retailer product pages for this product searched in a store.',
+    mode === 'barcode' ? `Barcode: ${query}` : `Search query: ${query}`,
     known ? `Known product hint: ${known}` : '',
     'Prefer brand sites and fashion retailers (Zara, H&M, ASOS, Uniqlo, Nike, Adidas, Farfetch, Zalando, department stores).',
     'Return ONLY a JSON array of 3 to 4 items, no markdown:',
@@ -315,6 +336,9 @@ async function hydrateHit(hit: SearchHit): Promise<RetailerMatch> {
     title: scraped.title ?? hit.title,
     brand: scraped.brand,
     price: scraped.price,
+    color: scraped.color,
+    availability: scraped.availability,
+    description: scraped.description,
     imageUrl: scraped.imageUrl,
     productUrl,
   }
@@ -351,6 +375,12 @@ function parseProductHtml(html: string, pageUrl: string): ScrapedFields {
     metaContent(html, 'og:image') ??
     metaContent(html, 'twitter:image')
   const brand = fromJsonLd.brand ?? metaContent(html, 'product:brand')
+  const color = fromJsonLd.color ?? metaContent(html, 'product:color')
+  const description =
+    fromJsonLd.description ??
+    metaContent(html, 'og:description') ??
+    metaContent(html, 'twitter:description') ??
+    metaContent(html, 'description')
   const price =
     fromJsonLd.price ??
     formatPrice(
@@ -363,6 +393,9 @@ function parseProductHtml(html: string, pageUrl: string): ScrapedFields {
   return {
     title: title ? decodeHtml(title) : undefined,
     brand: brand ? decodeHtml(brand) : undefined,
+    color: color ? decodeHtml(color) : undefined,
+    description: description ? tidyText(decodeHtml(description)) : undefined,
+    availability: fromJsonLd.availability,
     price,
     imageUrl: imageUrl ? resolveUrl(pageUrl, imageUrl) : undefined,
     retailer: retailerFromUrl(pageUrl),
@@ -384,6 +417,9 @@ function parseJsonLd(html: string): ScrapedFields {
       return {
         title: asString(product.name),
         brand: brandName(product.brand),
+        color: asString(product.color),
+        description: asString(product.description),
+        availability: prettyAvailability(asString(offer?.availability)),
         imageUrl: imageFromJsonLd(product.image),
         price: formatPrice(asString(offer?.price), asString(offer?.priceCurrency)),
       }
@@ -449,6 +485,19 @@ function metaContent(html: string, property: string): string | undefined {
     'i',
   )
   return propertyPattern.exec(html)?.[1] ?? contentFirstPattern.exec(html)?.[1]
+}
+
+function tidyText(value: string, max = 420): string {
+  const clean = value.replace(/\s+/g, ' ').trim()
+  if (clean.length <= max) return clean
+  return `${clean.slice(0, max).trim()}…`
+}
+
+function prettyAvailability(value?: string): string | undefined {
+  if (!value) return undefined
+  const label = value.split('/').pop() ?? value
+  const spaced = label.replace(/([a-z])([A-Z])/g, '$1 $2').trim()
+  return spaced || undefined
 }
 
 function formatPrice(amount?: string, currency?: string): string | undefined {

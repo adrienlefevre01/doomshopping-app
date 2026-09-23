@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { isOnboarded } from './lib/wishlist'
 import { Home } from './pages/Home'
 import { Matches } from './pages/Matches'
+import { ProductDetail } from './pages/ProductDetail'
 import { Profile } from './pages/Profile'
 import { Scan } from './pages/Scan'
 import { Welcome } from './pages/Welcome'
@@ -52,6 +53,14 @@ export default function App() {
           element={
             <RequireOnboard>
               <Matches />
+            </RequireOnboard>
+          }
+        />
+        <Route
+          path="/item/:id"
+          element={
+            <RequireOnboard>
+              <ProductDetail />
             </RequireOnboard>
           }
         />

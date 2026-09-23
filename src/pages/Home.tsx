@@ -1,26 +1,55 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Camera, ChevronRight } from 'lucide-react'
 import { BottomNav } from '../components/BottomNav'
-import { CameraIcon, ChevronIcon } from '../components/Icons'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ProductCard } from '../components/ProductCard'
-import { getBin, getWishlist, moveToBin } from '../lib/wishlist'
+import {
+  deleteFromBin,
+  getBin,
+  getWishlist,
+  moveToBin,
+  restoreFromBin,
+} from '../lib/wishlist'
+import type { WishlistItem } from '../types'
 
 type HomeTab = 'wishlist' | 'captured' | 'bin'
+
+type PendingDelete = {
+  item: WishlistItem
+  from: 'wishlist' | 'bin'
+}
 
 export function Home() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<HomeTab>('wishlist')
   const [items, setItems] = useState(() => getWishlist())
   const [binItems, setBinItems] = useState(() => getBin())
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
 
-  function handleRemove(id: string) {
-    moveToBin(id)
+  function refreshLists() {
     setItems(getWishlist())
     setBinItems(getBin())
   }
 
-  function handleOpen(url: string) {
-    window.open(url, '_blank', 'noopener,noreferrer')
+  function handleRestore(id: string) {
+    restoreFromBin(id)
+    refreshLists()
+  }
+
+  function handleConfirmDelete() {
+    if (!pendingDelete) return
+    if (pendingDelete.from === 'wishlist') {
+      moveToBin(pendingDelete.item.id)
+    } else {
+      deleteFromBin(pendingDelete.item.id)
+    }
+    setPendingDelete(null)
+    refreshLists()
+  }
+
+  function handleOpen(item: WishlistItem) {
+    navigate(`/item/${item.id}`)
   }
 
   const list = tab === 'bin' ? binItems : tab === 'wishlist' ? items : []
@@ -38,9 +67,9 @@ export function Home() {
         className="scan-pill"
         onClick={() => navigate('/scan')}
       >
-        <CameraIcon />
+        <Camera size={20} strokeWidth={1.75} />
         <span>Add a photo or scan barcode</span>
-        <ChevronIcon />
+        <ChevronRight size={18} strokeWidth={1.75} />
       </button>
 
       <div className="tabs" role="tablist" aria-label="Lists">
@@ -75,14 +104,34 @@ export function Home() {
             <li key={item.id}>
               <ProductCard
                 item={item}
-                onClick={() => handleOpen(item.productUrl)}
-                secondaryLabel={tab === 'wishlist' ? 'Remove' : undefined}
-                onSecondary={tab === 'wishlist' ? () => handleRemove(item.id) : undefined}
+                onClick={() => handleOpen(item)}
+                hearted={tab === 'wishlist'}
+                onHeart={tab === 'wishlist' ? () => undefined : undefined}
+                onTrash={
+                  tab === 'wishlist' || tab === 'bin'
+                    ? () => setPendingDelete({ item, from: tab })
+                    : undefined
+                }
+                onRestore={tab === 'bin' ? () => handleRestore(item.id) : undefined}
               />
             </li>
           ))}
         </ul>
       )}
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title={pendingDelete.from === 'bin' ? 'Delete item?' : 'Move to bin?'}
+          message={
+            pendingDelete.from === 'bin'
+              ? `Delete “${pendingDelete.item.title}” permanently? This cannot be undone.`
+              : `Move “${pendingDelete.item.title}” to the bin?`
+          }
+          confirmLabel={pendingDelete.from === 'bin' ? 'Delete' : 'Move to bin'}
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      ) : null}
 
       <BottomNav active="wishlist" />
     </section>
