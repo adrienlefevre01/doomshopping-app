@@ -57,15 +57,14 @@
 .page--welcome {
   background: var(--surface);
   justify-content: space-between;
-  padding-top: 48px;
+  padding-top: 72px;
 }
 
 .welcome__hero {
   text-align: center;
-  font-size: 34px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  margin-top: 8vh;
+  font-size: 42px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
 }
 
 .welcome__body {
@@ -73,18 +72,24 @@
 }
 
 .welcome__kicker {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  margin-bottom: 22px;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 24px;
 }
 
 .welcome__list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  font-size: 16px;
+  gap: 12px;
+  font-size: 17px;
   font-weight: 400;
+}
+
+.welcome__list s {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: #111;
 }
 
 .page--home,
@@ -100,7 +105,7 @@
   min-height: 56px;
   padding: 0 18px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 16px;
   background: var(--surface);
   color: var(--text);
   text-align: left;
@@ -240,16 +245,18 @@
 .dock__btn {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   padding: 0;
   border: 0;
+  border-radius: 50%;
   background: transparent;
   color: #bdbdbd;
 }
 
 .dock__btn.is-active {
-  color: var(--ink);
+  color: #fff;
+  background: #111;
 }
 
 .page--profile {

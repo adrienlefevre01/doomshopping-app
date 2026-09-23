@@ -23,7 +23,9 @@ export function Welcome() {
         <p className="welcome__kicker">NO MORE</p>
         <ul className="welcome__list">
           {MANIFESTO.map((item) => (
-            <li key={item}>{item}</li>
+            <li key={item}>
+              <s>{item}</s>
+            </li>
           ))}
         </ul>
       </div>
