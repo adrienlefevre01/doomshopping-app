@@ -7,8 +7,11 @@ import { ProductCard } from '../components/ProductCard'
 import {
   deleteFromBin,
   getBin,
+  getCaptured,
   getWishlist,
   moveToBin,
+  moveToCaptured,
+  moveToWishlist,
   restoreFromBin,
 } from '../lib/wishlist'
 import type { WishlistItem } from '../types'
@@ -17,18 +20,20 @@ type HomeTab = 'wishlist' | 'captured' | 'bin'
 
 type PendingDelete = {
   item: WishlistItem
-  from: 'wishlist' | 'bin'
+  from: 'wishlist' | 'captured' | 'bin'
 }
 
 export function Home() {
   const navigate = useNavigate()
   const [tab, setTab] = useState<HomeTab>('wishlist')
   const [items, setItems] = useState(() => getWishlist())
+  const [capturedItems, setCapturedItems] = useState(() => getCaptured())
   const [binItems, setBinItems] = useState(() => getBin())
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null)
 
   function refreshLists() {
     setItems(getWishlist())
+    setCapturedItems(getCaptured())
     setBinItems(getBin())
   }
 
@@ -37,12 +42,21 @@ export function Home() {
     refreshLists()
   }
 
+  function handleHeart(item: WishlistItem) {
+    if (tab === 'wishlist') {
+      moveToCaptured(item.id)
+    } else {
+      moveToWishlist(item.id)
+    }
+    refreshLists()
+  }
+
   function handleConfirmDelete() {
     if (!pendingDelete) return
-    if (pendingDelete.from === 'wishlist') {
-      moveToBin(pendingDelete.item.id)
-    } else {
+    if (pendingDelete.from === 'bin') {
       deleteFromBin(pendingDelete.item.id)
+    } else {
+      moveToBin(pendingDelete.item.id)
     }
     setPendingDelete(null)
     refreshLists()
@@ -52,7 +66,8 @@ export function Home() {
     navigate(`/item/${item.id}`)
   }
 
-  const list = tab === 'bin' ? binItems : tab === 'wishlist' ? items : []
+  const list =
+    tab === 'bin' ? binItems : tab === 'captured' ? capturedItems : items
   const emptyCopy =
     tab === 'wishlist'
       ? 'Your wishlist is empty'
@@ -106,9 +121,13 @@ export function Home() {
                 item={item}
                 onClick={() => handleOpen(item)}
                 hearted={tab === 'wishlist'}
-                onHeart={tab === 'wishlist' ? () => undefined : undefined}
+                onHeart={
+                  tab === 'wishlist' || tab === 'captured'
+                    ? () => handleHeart(item)
+                    : undefined
+                }
                 onTrash={
-                  tab === 'wishlist' || tab === 'bin'
+                  tab === 'wishlist' || tab === 'captured' || tab === 'bin'
                     ? () => setPendingDelete({ item, from: tab })
                     : undefined
                 }

@@ -112,7 +112,7 @@ export function ProductDetail() {
           <ChevronLeft size={22} strokeWidth={1.75} />
         </button>
         {item.imageUrl ? (
-          <img src={item.imageUrl} alt={item.title} />
+          <img src={item.imageUrl} alt={item.title} referrerPolicy="no-referrer" />
         ) : (
           <div className="product-hero__placeholder" aria-hidden="true" />
         )}

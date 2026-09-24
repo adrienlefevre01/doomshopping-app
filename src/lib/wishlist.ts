@@ -1,6 +1,7 @@
 import type { RetailerMatch, WishlistItem } from '../types'
 
 const WISHLIST_KEY = 'doomshopping.wishlist'
+const CAPTURED_KEY = 'doomshopping.captured'
 const BIN_KEY = 'doomshopping.bin'
 const ONBOARDED_KEY = 'doomshopping.hasOnboarded'
 const SEEDED_KEY = 'doomshopping.seeded.v1'
@@ -202,10 +203,10 @@ export function addWishlistItem(
   return next
 }
 
-export function getBin(): WishlistItem[] {
+function readList(key: string): WishlistItem[] {
   if (!canUseStorage()) return []
   try {
-    const raw = window.localStorage.getItem(BIN_KEY)
+    const raw = window.localStorage.getItem(key)
     if (!raw) return []
     const parsed = JSON.parse(raw) as WishlistItem[]
     return Array.isArray(parsed) ? parsed.map(enrichKnownItem) : []
@@ -214,22 +215,74 @@ export function getBin(): WishlistItem[] {
   }
 }
 
+function saveList(key: string, items: WishlistItem[]) {
+  if (!canUseStorage()) return
+  window.localStorage.setItem(key, JSON.stringify(items))
+}
+
+export function getCaptured(): WishlistItem[] {
+  return readList(CAPTURED_KEY)
+}
+
+function saveCaptured(items: WishlistItem[]) {
+  saveList(CAPTURED_KEY, items)
+}
+
+export function getBin(): WishlistItem[] {
+  return readList(BIN_KEY)
+}
+
 export function findSavedItem(id: string): WishlistItem | undefined {
   return (
     getWishlist().find((item) => item.id === id) ??
+    getCaptured().find((item) => item.id === id) ??
     getBin().find((item) => item.id === id)
   )
 }
 
 function saveBin(items: WishlistItem[]) {
-  if (!canUseStorage()) return
-  window.localStorage.setItem(BIN_KEY, JSON.stringify(items))
+  saveList(BIN_KEY, items)
+}
+
+function takeSavedItem(id: string): WishlistItem | undefined {
+  const fromWishlist = getWishlist().find((entry) => entry.id === id)
+  if (fromWishlist) {
+    saveWishlist(getWishlist().filter((entry) => entry.id !== id))
+    return fromWishlist
+  }
+  const fromCaptured = getCaptured().find((entry) => entry.id === id)
+  if (fromCaptured) {
+    saveCaptured(getCaptured().filter((entry) => entry.id !== id))
+    return fromCaptured
+  }
+  return undefined
+}
+
+export function moveToCaptured(id: string) {
+  const item = takeSavedItem(id)
+  if (!item) return
+  saveCaptured([item, ...getCaptured().filter((entry) => entry.id !== id)])
+}
+
+export function moveToWishlist(id: string) {
+  const captured = getCaptured().find((entry) => entry.id === id)
+  const item = captured ?? getBin().find((entry) => entry.id === id)
+  if (!item) return
+  if (captured) {
+    saveCaptured(getCaptured().filter((entry) => entry.id !== id))
+  } else {
+    saveBin(getBin().filter((entry) => entry.id !== id))
+  }
+  const items = getWishlist()
+  if (items.some((entry) => entry.id === id || entry.productUrl === item.productUrl)) {
+    return
+  }
+  saveWishlist([item, ...items])
 }
 
 export function moveToBin(id: string) {
-  const item = getWishlist().find((entry) => entry.id === id)
+  const item = takeSavedItem(id)
   if (!item) return
-  saveWishlist(getWishlist().filter((entry) => entry.id !== id))
   saveBin([item, ...getBin().filter((entry) => entry.id !== id)])
 }
 
@@ -252,22 +305,24 @@ export function updateSavedItem(
   id: string,
   patch: Partial<WishlistItem>,
 ): WishlistItem | undefined {
-  const wishlist = getWishlist()
-  const wishIndex = wishlist.findIndex((item) => item.id === id)
-  if (wishIndex !== -1) {
-    const next = { ...wishlist[wishIndex], ...patch }
-    const copy = [...wishlist]
-    copy[wishIndex] = next
-    saveWishlist(copy)
+  const lists: Array<{
+    read: () => WishlistItem[]
+    write: (items: WishlistItem[]) => void
+  }> = [
+    { read: getWishlist, write: saveWishlist },
+    { read: getCaptured, write: saveCaptured },
+    { read: getBin, write: saveBin },
+  ]
+
+  for (const list of lists) {
+    const items = list.read()
+    const index = items.findIndex((item) => item.id === id)
+    if (index === -1) continue
+    const next = { ...items[index], ...patch }
+    const copy = [...items]
+    copy[index] = next
+    list.write(copy)
     return next
   }
-
-  const bin = getBin()
-  const binIndex = bin.findIndex((item) => item.id === id)
-  if (binIndex === -1) return undefined
-  const next = { ...bin[binIndex], ...patch }
-  const copy = [...bin]
-  copy[binIndex] = next
-  saveBin(copy)
-  return next
+  return undefined
 }

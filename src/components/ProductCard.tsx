@@ -32,7 +32,7 @@ export function ProductCard({
     >
       <div className="product-card__image">
         {item.imageUrl ? (
-          <img src={item.imageUrl} alt="" />
+          <img src={item.imageUrl} alt="" referrerPolicy="no-referrer" />
         ) : (
           <div className="product-card__placeholder" />
         )}
