@@ -20,6 +20,7 @@ type ScrapedFields = {
   imageUrl?: string
   retailer?: string
   finalUrl?: string
+  matchedBarcode?: boolean
 }
 
 export type LookupResponse = {
@@ -38,6 +39,8 @@ type ProductIdentity = {
   brand?: string
   imageUrl?: string
   offers?: SearchHit[]
+  catalogUrl?: string
+  source?: string
 }
 
 const IDENTITY_TTL_MS = 60 * 60 * 1000
@@ -104,18 +107,28 @@ export async function handleLookup(
   }
 
   const apiKey = env.GEMINI_API_KEY?.trim() || env.SEARCH_API_KEY?.trim()
-  if (!apiKey) {
-    return {
-      status: 503,
-      body: {
-        error:
-          'Search is not configured yet. Add GEMINI_API_KEY on the server.',
-      },
-    }
-  }
 
   try {
     const identity = isBarcode ? await lookupBarcodeIdentity(normalized) : {}
+    if (isBarcode && !identity.title) {
+      return {
+        status: 404,
+        body: {
+          error:
+            'Could not identify this barcode in a product catalog. Search by name instead of guessing.',
+        },
+      }
+    }
+    if (!isBarcode && !apiKey) {
+      return {
+        status: 503,
+        body: {
+          error:
+            'Search is not configured yet. Add GEMINI_API_KEY on the server.',
+        },
+      }
+    }
+
     const hits = await searchRetailerLinks(
       normalized,
       identity,
@@ -123,7 +136,20 @@ export async function handleLookup(
       env.GEMINI_MODEL,
       isBarcode ? 'barcode' : 'query',
     )
-    if (hits.length === 0) {
+
+    const verified: RetailerMatch[] = []
+    for (const hit of hits.slice(0, MAX_CANDIDATES + 2)) {
+      const item = await hydrateVerifiedHit(hit, identity, isBarcode ? normalized : undefined)
+      if (!item) continue
+      verified.push(item)
+      if (verified.length >= MAX_CANDIDATES) break
+    }
+
+    if (verified.length === 0 && identity.title) {
+      verified.push(catalogCandidate(identity, normalized))
+    }
+
+    if (verified.length === 0) {
       return {
         status: 404,
         body: {
@@ -134,13 +160,9 @@ export async function handleLookup(
       }
     }
 
-    const candidates = (
-      await Promise.all(hits.slice(0, MAX_CANDIDATES).map((hit) => hydrateHit(hit)))
-    ).filter((item: RetailerMatch) => Boolean(item.productUrl))
-
     return {
       status: 200,
-      body: { barcode: normalized, candidates },
+      body: { barcode: normalized, candidates: verified },
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
@@ -161,13 +183,34 @@ async function lookupBarcodeIdentity(barcode: string): Promise<ProductIdentity> 
   const cached = identityCache.get(barcode)
   if (cached && cached.expires > Date.now()) return cached.value
 
-  const fromApi = await lookupUpcitemdbApi(barcode)
+  const [fromApi, fromFacts] = await Promise.all([
+    lookupUpcitemdbApi(barcode),
+    lookupOpenFacts(barcode),
+  ])
   const value =
     fromApi.title || fromApi.offers?.length
-      ? fromApi
-      : await scrapeBarcodeCatalogs(barcode)
-  identityCache.set(barcode, { expires: Date.now() + IDENTITY_TTL_MS, value })
-  return value
+      ? {
+          ...fromFacts,
+          ...fromApi,
+          imageUrl: fromApi.imageUrl ?? fromFacts.imageUrl,
+          catalogUrl: fromApi.catalogUrl ?? fromFacts.catalogUrl,
+        }
+      : fromFacts.title
+        ? fromFacts
+        : await scrapeBarcodeCatalogs(barcode)
+  const usable = isUsableIdentity(value, barcode) ? value : {}
+  identityCache.set(barcode, { expires: Date.now() + IDENTITY_TTL_MS, value: usable })
+  return usable
+}
+
+function isUsableIdentity(identity: ProductIdentity, barcode: string): boolean {
+  if (!identity.title) return false
+  if (/^0+$/.test(barcode)) return false
+  const title = identity.title.trim()
+  const brand = identity.brand?.trim() ?? ''
+  if (/^n\/a$/i.test(title) || /^n\/a$/i.test(brand)) return false
+  if (/placeholder|unknown product|no product found/i.test(title)) return false
+  return title.length >= 4
 }
 
 async function lookupUpcitemdbApi(barcode: string): Promise<ProductIdentity> {
@@ -207,6 +250,8 @@ async function lookupUpcitemdbApi(barcode: string): Promise<ProductIdentity> {
       brand: item.brand,
       imageUrl: item.images?.[0],
       offers: offers.filter((offer) => isUsefulProductUrl(offer.url)),
+      catalogUrl: `https://www.upcitemdb.com/upc/${barcode}`,
+      source: 'UPCitemdb',
     }
   } catch {
     return {}
@@ -230,7 +275,7 @@ async function scrapeBarcodeCatalogs(barcode: string): Promise<ProductIdentity> 
       })
       if (!response.ok) continue
       const html = await response.text()
-      const identity = parseBarcodeCatalogHtml(html, barcode)
+      const identity = parseBarcodeCatalogHtml(html, barcode, pageUrl)
       if (identity.title) return identity
     } catch {
       continue
@@ -239,7 +284,11 @@ async function scrapeBarcodeCatalogs(barcode: string): Promise<ProductIdentity> 
   return {}
 }
 
-function parseBarcodeCatalogHtml(html: string, barcode: string): ProductIdentity {
+function parseBarcodeCatalogHtml(
+  html: string,
+  barcode: string,
+  pageUrl: string,
+): ProductIdentity {
   const raw =
     html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ??
     html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1] ??
@@ -260,16 +309,79 @@ function parseBarcodeCatalogHtml(html: string, barcode: string): ProductIdentity
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)?.[1],
     '',
   )
-  return { title, brand, imageUrl }
+  return {
+    title,
+    brand,
+    imageUrl,
+    catalogUrl: pageUrl,
+    source: pageUrl.includes('go-upc.com') ? 'Go-UPC' : 'UPCitemdb',
+  }
+}
+
+async function lookupOpenFacts(barcode: string): Promise<ProductIdentity> {
+  const hosts = [
+    'world.openproductsfacts.org',
+    'world.openfoodfacts.org',
+    'world.openbeautyfacts.org',
+  ]
+  const codes = barcodeVariants(barcode).slice(0, 2)
+  const results = await Promise.all(
+    hosts.flatMap((host) =>
+      codes.map(async (code) => {
+        try {
+          const response = await fetch(
+            `https://${host}/api/v2/product/${encodeURIComponent(code)}.json`,
+            {
+              signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+              headers: {
+                Accept: 'application/json',
+                'User-Agent': 'Doomshopping/0.1 (barcode lookup)',
+              },
+            },
+          )
+          if (!response.ok) return {}
+          const data = (await response.json()) as {
+            status?: number
+            product?: {
+              product_name?: string
+              product_name_en?: string
+              brands?: string
+              image_url?: string
+              image_front_url?: string
+            }
+          }
+          const title = data.product?.product_name || data.product?.product_name_en
+          if (data.status !== 1 || !title) return {}
+          return {
+            title,
+            brand: data.product?.brands?.split(',')[0]?.trim(),
+            imageUrl: usableImageUrl(
+              data.product?.image_url || data.product?.image_front_url,
+            ),
+            catalogUrl: `https://${host}/product/${code}`,
+            source: 'Open Facts',
+          } satisfies ProductIdentity
+        } catch {
+          return {}
+        }
+      }),
+    ),
+  )
+  return results.find((item) => item.title) ?? {}
 }
 
 async function searchRetailerLinks(
   query: string,
   identity: ProductIdentity,
-  apiKey: string,
+  apiKey: string | undefined,
   preferredModel: string | undefined,
   mode: 'barcode' | 'query',
 ): Promise<SearchHit[]> {
+  const catalogHits = identity.offers ?? []
+  if (!apiKey || (mode === 'barcode' && !identity.title)) {
+    return dedupeHits(catalogHits)
+  }
+
   const models = [
     preferredModel?.trim(),
     ...GEMINI_MODELS,
@@ -286,9 +398,17 @@ async function searchRetailerLinks(
           imageUrl: hit.imageUrl ?? identity.imageUrl,
         })),
       )
-      const useful = dedupeHits(resolved.filter((hit) => isUsefulProductUrl(hit.url)))
+      const useful = dedupeHits(
+        resolved.filter((hit) => {
+          if (!isUsefulProductUrl(hit.url)) return false
+          if (mode === 'barcode' && identity.title) {
+            return titlesOverlap(identity.title, hit.title, identity.brand)
+          }
+          return true
+        }),
+      )
       if (useful.length === 0) throw new Error('gemini empty')
-      return useful
+      return dedupeHits([...catalogHits, ...useful])
     } catch (error) {
       lastError = error instanceof Error ? error : new Error('search failed')
       if (lastError.message === 'gemini unauthorized') throw lastError
@@ -297,7 +417,7 @@ async function searchRetailerLinks(
     }
   }
 
-  if (identity.offers?.length) return dedupeHits(identity.offers)
+  if (catalogHits.length) return dedupeHits(catalogHits)
   if (lastError?.message === 'gemini empty' || lastError?.message === 'gemini timeout') {
     return []
   }
@@ -321,16 +441,17 @@ async function searchGemini(
   model: string,
   mode: 'barcode' | 'query',
 ): Promise<SearchHit[]> {
+  if (mode === 'barcode' && !identity.title) {
+    throw new Error('gemini empty')
+  }
+
   const prompt = [
     'Find 3 official clothing retailer product pages for this exact product.',
-    identity.title
-      ? `Product: ${identity.title}`
-      : mode === 'barcode'
-        ? `Barcode: ${query}`
-        : `Search query: ${query}`,
+    identity.title ? `Product: ${identity.title}` : `Search query: ${query}`,
     identity.brand ? `Brand: ${identity.brand}` : '',
-    mode === 'barcode' && identity.title ? `Barcode: ${query}` : '',
+    mode === 'barcode' ? `Barcode: ${query}` : '',
     'Only return pages for this same product, not other items from the brand.',
+    'Do not invent URLs or substitute a different product.',
     'Return JSON only:',
     '[{"retailer":"Nike","title":"...","url":"https://...","imageUrl":"https://...","price":"$64"}]',
     'Use real product page URLs only. No search pages or social posts.',
@@ -400,6 +521,20 @@ async function searchGemini(
     }))
     .filter((hit) => hit.url)
 
+  if (mode === 'barcode') {
+    if (fromGrounding.length === 0) throw new Error('gemini empty')
+    const grounded = fromGrounding.map((hit) => {
+      const extra = fromModel.find((item) => sameListingUrl(item.url, hit.url))
+      return {
+        ...hit,
+        title: extra?.title || hit.title,
+        imageUrl: extra?.imageUrl,
+        price: extra?.price,
+      }
+    })
+    return grounded
+  }
+
   const hits = [...fromModel, ...fromGrounding]
   if (hits.length === 0) throw new Error('gemini empty')
   return hits
@@ -466,23 +601,124 @@ function parseHitsFromModelText(text: string): SearchHit[] {
   }
 }
 
-async function hydrateHit(hit: SearchHit): Promise<RetailerMatch> {
-  const scraped = await scrapeProductPage(hit.url)
+async function hydrateVerifiedHit(
+  hit: SearchHit,
+  identity: ProductIdentity,
+  barcode?: string,
+): Promise<RetailerMatch | undefined> {
+  const scraped = await scrapeProductPage(hit.url, barcode)
   const productUrl = scraped.finalUrl ?? hit.url
-  return {
+  const title = scraped.title ?? hit.title
+  const item: RetailerMatch = {
     retailer:
       scraped.retailer ??
       retailerFromUrl(productUrl) ??
       hit.source ??
       'Store',
-    title: scraped.title ?? hit.title,
-    brand: scraped.brand,
+    title,
+    brand: scraped.brand ?? identity.brand,
     price: scraped.price ?? hit.price,
     color: scraped.color,
     availability: scraped.availability,
     description: scraped.description,
-    imageUrl: scraped.imageUrl ?? usableImageUrl(hit.imageUrl, productUrl),
+    imageUrl: scraped.imageUrl ?? usableImageUrl(hit.imageUrl ?? identity.imageUrl, productUrl),
     productUrl,
+  }
+  if (barcode && !listingMatchesIdentity(item, identity, barcode, scraped.matchedBarcode)) {
+    return undefined
+  }
+  return item
+}
+
+function catalogCandidate(identity: ProductIdentity, barcode: string): RetailerMatch {
+  return {
+    retailer: identity.source ?? 'Product catalog',
+    title: identity.title ?? 'Product',
+    brand: identity.brand,
+    imageUrl: identity.imageUrl,
+    productUrl:
+      identity.catalogUrl ?? `https://go-upc.com/search?q=${encodeURIComponent(barcode)}`,
+  }
+}
+
+function listingMatchesIdentity(
+  item: RetailerMatch,
+  identity: ProductIdentity,
+  barcode: string,
+  matchedBarcode?: boolean,
+): boolean {
+  if (matchedBarcode) return true
+  if (barcodeVariants(barcode).some((code) => item.productUrl.includes(code))) return true
+  if (identity.title && titlesOverlap(identity.title, item.title, identity.brand)) return true
+  return false
+}
+
+function titlesOverlap(catalogTitle: string, pageTitle: string, brand?: string): boolean {
+  const catalogTokens = significantTokens(catalogTitle, brand)
+  if (catalogTokens.length === 0) return false
+  const pageTokens = new Set(significantTokens(pageTitle, brand))
+  const overlap = catalogTokens.filter((token) => pageTokens.has(token))
+  const needed = catalogTokens.length >= 3 ? 2 : 1
+  return overlap.length >= needed
+}
+
+const GENERIC_TITLE_TOKENS = new Set([
+  'mens',
+  'womens',
+  'men',
+  'women',
+  'kids',
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'size',
+  'pack',
+  'new',
+  'official',
+  'shirt',
+  'shirts',
+  'tee',
+  'tees',
+])
+
+function significantTokens(title: string, brand?: string): string[] {
+  const brandToken = brand?.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => {
+      if (token.length < 4) return false
+      if (GENERIC_TITLE_TOKENS.has(token)) return false
+      if (brandToken && token === brandToken) return false
+      return true
+    })
+}
+
+function barcodeVariants(barcode: string): string[] {
+  const compact = barcode.replace(/\D/g, '')
+  if (!compact) return []
+  const ean13 = compact.padStart(13, '0')
+  const upc12 = ean13.slice(-12)
+  const stripped = compact.replace(/^0+/, '') || compact
+  return [...new Set([compact, ean13, upc12, stripped])]
+}
+
+function htmlMentionsBarcode(html: string, barcode: string): boolean {
+  return barcodeVariants(barcode).some((code) => code.length >= 8 && html.includes(code))
+}
+
+function sameListingUrl(left: string, right: string): boolean {
+  try {
+    const a = new URL(left)
+    const b = new URL(right)
+    return a.hostname.replace(/^www\./, '') === b.hostname.replace(/^www\./, '') &&
+      a.pathname.replace(/\/$/, '') === b.pathname.replace(/\/$/, '')
+  } catch {
+    return left === right
   }
 }
 
@@ -491,7 +727,10 @@ const BROWSER_HEADERS = {
   'Accept-Language': 'en-US,en;q=0.8',
 }
 
-export async function scrapeProductPage(pageUrl: string): Promise<ScrapedFields> {
+export async function scrapeProductPage(
+  pageUrl: string,
+  barcode?: string,
+): Promise<ScrapedFields> {
   const agents = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
@@ -514,7 +753,11 @@ export async function scrapeProductPage(pageUrl: string): Promise<ScrapedFields>
       }
       const html = await response.text()
       const finalUrl = response.url || pageUrl
-      scraped = { ...parseProductHtml(html, finalUrl), finalUrl }
+      scraped = {
+        ...parseProductHtml(html, finalUrl),
+        finalUrl,
+        matchedBarcode: barcode ? htmlMentionsBarcode(html, barcode) : undefined,
+      }
       if (scraped.imageUrl && scraped.price) return scraped
       break
     } catch {
@@ -522,8 +765,14 @@ export async function scrapeProductPage(pageUrl: string): Promise<ScrapedFields>
     }
   }
 
-  const shopify = await scrapeShopifyProduct(scraped.finalUrl || pageUrl)
-  if (!shopify.imageUrl && !scraped.imageUrl) return { ...scraped, ...shopify }
+  const shopify = await scrapeShopifyProduct(scraped.finalUrl || pageUrl, barcode)
+  if (!shopify.imageUrl && !scraped.imageUrl) {
+    return {
+      ...scraped,
+      ...shopify,
+      matchedBarcode: scraped.matchedBarcode || shopify.matchedBarcode,
+    }
+  }
   return {
     ...scraped,
     ...shopify,
@@ -532,10 +781,14 @@ export async function scrapeProductPage(pageUrl: string): Promise<ScrapedFields>
     brand: scraped.brand ?? shopify.brand,
     price: scraped.price ?? shopify.price,
     finalUrl: scraped.finalUrl ?? shopify.finalUrl,
+    matchedBarcode: scraped.matchedBarcode || shopify.matchedBarcode,
   }
 }
 
-async function scrapeShopifyProduct(pageUrl: string): Promise<ScrapedFields> {
+async function scrapeShopifyProduct(
+  pageUrl: string,
+  barcode?: string,
+): Promise<ScrapedFields> {
   let parsed: URL
   try {
     parsed = new URL(pageUrl)
@@ -566,19 +819,25 @@ async function scrapeShopifyProduct(pageUrl: string): Promise<ScrapedFields> {
       price_min?: number | string
       price_currency?: string
       currency?: string
-      variants?: Array<{ price?: number | string }>
+      variants?: Array<{ price?: number | string; barcode?: string }>
     }
     const rawImage =
       data.featured_image ||
       (typeof data.images?.[0] === 'string'
         ? data.images[0]
         : data.images?.[0]?.src)
+    const variantCodes = (data.variants ?? [])
+      .map((variant) => variant.barcode)
+      .filter((value): value is string => Boolean(value))
     return {
       title: asString(data.title),
       brand: asString(data.vendor),
       imageUrl: usableImageUrl(rawImage, jsonUrl),
       price: shopifyPrice(data),
       finalUrl: pageUrl,
+      matchedBarcode: barcode
+        ? variantCodes.some((code) => barcodeVariants(barcode).includes(code.replace(/\D/g, '')))
+        : undefined,
     }
   } catch {
     return {}
