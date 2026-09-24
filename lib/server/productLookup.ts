@@ -321,7 +321,6 @@ async function searchGemini(
   model: string,
   mode: 'barcode' | 'query',
 ): Promise<SearchHit[]> {
-  const known = [identity.title, identity.brand].filter(Boolean).join(' by ')
   const prompt = [
     'Find 3 official clothing retailer product pages for this exact product.',
     identity.title
