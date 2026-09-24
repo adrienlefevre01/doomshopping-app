@@ -203,13 +203,19 @@ async function lookupBarcodeIdentity(barcode: string): Promise<ProductIdentity> 
   return usable
 }
 
+function isMissingCatalogTitle(title: string): boolean {
+  return /product not found|no product found|invalid value|unknown product|placeholder|not found/i.test(
+    title,
+  )
+}
+
 function isUsableIdentity(identity: ProductIdentity, barcode: string): boolean {
   if (!identity.title) return false
   if (/^0+$/.test(barcode)) return false
   const title = identity.title.trim()
   const brand = identity.brand?.trim() ?? ''
   if (/^n\/a$/i.test(title) || /^n\/a$/i.test(brand)) return false
-  if (/placeholder|unknown product|no product found/i.test(title)) return false
+  if (isMissingCatalogTitle(title)) return false
   return title.length >= 4
 }
 
@@ -289,10 +295,17 @@ function parseBarcodeCatalogHtml(
   barcode: string,
   pageUrl: string,
 ): ProductIdentity {
+  if (isMissingCatalogTitle(html.match(/<title>([^<]+)/i)?.[1] ?? html.slice(0, 2000))) {
+    return {}
+  }
+  const heading = html.match(/<h1[^>]*>([^<]+)/i)?.[1]?.trim()
+  if (pageUrl.includes('go-upc.com') && (!heading || isMissingCatalogTitle(heading))) {
+    return {}
+  }
   const raw =
+    heading ??
     html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ??
     html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1] ??
-    html.match(/<h1[^>]*>([^<]+)/i)?.[1] ??
     html.match(/<title>([^<]+)/i)?.[1]
   if (!raw) return {}
   let title = decodeHtml(raw)
@@ -300,7 +313,7 @@ function parseBarcodeCatalogHtml(
     .replace(new RegExp(`(?:UPC|EAN)\\s*${escapeRegExp(barcode)}\\s*[-–—:]?\\s*`, 'i'), '')
     .replace(/\s+[—–-]\s+Go-UPC$/i, '')
     .trim()
-  if (!title || /^upc\s/i.test(title)) return {}
+  if (!title || /^upc\s/i.test(title) || isMissingCatalogTitle(title)) return {}
   const brand =
     html.match(/<[^>]+class=["'][^"']*brand[^"']*["'][^>]*>([^<]+)/i)?.[1]?.trim() ??
     title.split(/\s+/)[0]
